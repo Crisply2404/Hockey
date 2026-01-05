@@ -1,0 +1,5 @@
+{
+  "name": "Hockey",
+  "description": "An extreme minimalist, high-impact black and white air hockey game featuring fluid physics, intense 'juiciness' effects (particles, screen shake, inversion), and smart AI.",
+  "requestFramePermissions": []
+}
