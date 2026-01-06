@@ -4,6 +4,30 @@ import { HockeyRef } from '../types';
 
 interface HockeyProps {
   mode: 'pve' | 'pvp';
+    // Optional online driver:
+    // - host can read local input and emit snapshots
+    // - guest can apply snapshots and render interpolation
+    online?: {
+        enabled: boolean;
+        role: 'host' | 'guest';
+        // For guest: latest authoritative snapshot to render.
+        snapshot?: {
+            p1: { x: number; y: number; score: number };
+            p2: { x: number; y: number; score: number };
+            puck: { x: number; y: number; vx: number; vy: number; spin: number; rotation: number };
+            leftGoalIntegrity: boolean;
+            rightGoalIntegrity: boolean;
+            winner: null | 1 | 2;
+        };
+        // For host: callback to publish snapshots.
+        onSnapshot?: (snap: any) => void;
+        // For host: optional hook to receive remote input.
+        remoteInput?: {
+            keys: { up: boolean; down: boolean; left: boolean; right: boolean };
+            // for p2 in pvp online, allow remote mouse too if desired later
+            mouse?: { x: number | null; y: number | null };
+        };
+    };
 }
 
 // --- CONSTANTS (USER TUNED) ---
@@ -59,7 +83,7 @@ const COLOR_VELOCITY = '#0000FF';
 const COLOR_SPIN = '#FF0000';
 const COLOR_CONFETTI = ['#FF0000', '#0000FF', '#00FF00', '#FF00FF', '#FFFF00'];
 
-const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode }, ref) => {
+const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
     // Feature toggle: disable hit-stop pull-back / blue<->red conversion for now.
@@ -351,9 +375,34 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode }, ref) => {
       const rawDt = (time - lastTime) / 16.666; 
       lastTime = time;
       
-      const s = state.current;
+            const s = state.current;
       const dt = Math.min(rawDt, 4.0) * s.slowMoFactor;
       const inp = inputs.current;
+
+            // Online guest: apply authoritative snapshot and skip all gameplay simulation.
+            if (online?.enabled && online.role === 'guest' && online.snapshot) {
+                const snap = online.snapshot;
+                s.winner = snap.winner;
+                s.p1.x = snap.p1.x; s.p1.y = snap.p1.y; s.p1.score = snap.p1.score;
+                s.p2.x = snap.p2.x; s.p2.y = snap.p2.y; s.p2.score = snap.p2.score;
+                s.puck.x = snap.puck.x; s.puck.y = snap.puck.y;
+                s.puck.vx = snap.puck.vx; s.puck.vy = snap.puck.vy;
+                s.puck.spin = snap.puck.spin; s.puck.rotation = snap.puck.rotation;
+                s.leftGoalIntegrity = snap.leftGoalIntegrity;
+                s.rightGoalIntegrity = snap.rightGoalIntegrity;
+                // zero out juice; visuals can diverge
+                s.hitStop = 0;
+                s.goalActive = false;
+                s.shake = 0;
+            }
+
+            // Online host: apply remote input to player2 controls in PVP.
+            if (online?.enabled && online.role === 'host' && mode === 'pvp' && online.remoteInput) {
+                inp.up = online.remoteInput.keys.up;
+                inp.down = online.remoteInput.keys.down;
+                inp.left = online.remoteInput.keys.left;
+                inp.right = online.remoteInput.keys.right;
+            }
 
     // 计算输入速度（冻结帧也有效：实体不动，但意图仍可捕捉）
       if (inp.mouseX !== null && inp.mouseY !== null) {
@@ -446,7 +495,7 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode }, ref) => {
           s.p2.y = Math.max(PADDLE_RADIUS, Math.min(TABLE_HEIGHT - PADDLE_RADIUS, s.p2.y));
       }
 
-      if (s.winner === null) {
+    if (s.winner === null && !(online?.enabled && online.role === 'guest')) {
         // --- LOGIC ---
         s.p1.recoilX *= (0.85 * dt + (1-dt)); s.p1.recoilY *= (0.85 * dt + (1-dt));
         s.p2.recoilX *= (0.85 * dt + (1-dt)); s.p2.recoilY *= (0.85 * dt + (1-dt));
@@ -960,6 +1009,25 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode }, ref) => {
             if (vSq > MAX_SPEED**2) { s.puck.vx *= 0.95; s.puck.vy *= 0.95; }
         }
       }
+
+            // Online host: emit snapshot after simulation step (authoritative state only).
+            if (online?.enabled && online.role === 'host' && online.onSnapshot) {
+                online.onSnapshot({
+                    p1: { x: s.p1.x, y: s.p1.y, score: s.p1.score },
+                    p2: { x: s.p2.x, y: s.p2.y, score: s.p2.score },
+                    puck: {
+                        x: s.puck.x,
+                        y: s.puck.y,
+                        vx: s.puck.vx,
+                        vy: s.puck.vy,
+                        spin: s.puck.spin,
+                        rotation: s.puck.rotation,
+                    },
+                    leftGoalIntegrity: s.leftGoalIntegrity,
+                    rightGoalIntegrity: s.rightGoalIntegrity,
+                    winner: s.winner,
+                });
+            }
 
       ctx.setTransform(1, 0, 0, 1, 0, 0); 
       ctx.fillStyle = COLOR_BG;
