@@ -1,232 +1,201 @@
-import { isWsClientMsg, RoomSummary, WsClientMsg, WsServerMsg } from './protocol';
+import { wsClientMsgSchema, type RoomSummary, type WsServerMsg } from './protocol';
+import { DurableObject } from 'cloudflare:workers';
 
-type Env = {
-  LOBBY: DurableObjectNamespace<Lobby>;
-};
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname === '/health') return new Response('ok');
-
-    // Basic debug endpoint to validate the request reaches the Worker and to see upgrade headers.
-    if (url.pathname === '/debug') {
-      const headers: Record<string, string> = {};
-      for (const [k, v] of request.headers) headers[k] = v;
-      return Response.json({
-        ok: true,
-        path: url.pathname,
-        method: request.method,
-        upgrade: request.headers.get('Upgrade'),
-        headers,
-      });
-    }
-
-    if (url.pathname === '/ws') {
-      if (request.headers.get('Upgrade') !== 'websocket') {
-        return new Response('Expected websocket', { status: 426 });
-      }
-      const id = env.LOBBY.idFromName('global');
-      const stub = env.LOBBY.get(id);
-      return stub.fetch(request);
-    }
-
-    return new Response('Not found', { status: 404 });
-  },
-};
-
+type Env = { LOBBY: DurableObjectNamespace<Lobby>; ALLOWED_ORIGINS: string };
 type PlayerConn = {
-  socket: WebSocket;
+  id: string;
   playerName: string;
   joinedRoomId: string | null;
-};
-
-type Room = {
-  roomId: string;
+  role: 'host' | 'guest' | null;
   createdAt: number;
-  host: WebSocket;
-  guest: WebSocket | null;
-  hostName: string;
-  guestName: string | null;
+  tokens: number;
+  updatedAt: number;
 };
+type Room = { roomId: string; createdAt: number; host: WebSocket; guest: WebSocket | null };
 
-export class Lobby implements DurableObject {
-  private state: DurableObjectState;
-  private conns: Map<string, PlayerConn> = new Map();
-  private rooms: Map<string, Room> = new Map();
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === '/health') return Response.json({ ok: true, service: 'hockey-lobby' });
+    if (url.pathname !== '/ws') return new Response('Not found', { status: 404 });
+    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+      return new Response('Expected WebSocket', { status: 426 });
+    }
+    const origin = request.headers.get('Origin');
+    if (origin && !env.ALLOWED_ORIGINS.split(',').includes(origin)) {
+      return new Response('Origin not allowed', { status: 403 });
+    }
+    return env.LOBBY.get(env.LOBBY.idFromName('global')).fetch(request);
+  },
+} satisfies ExportedHandler<Env>;
 
-  constructor(state: DurableObjectState) {
-    this.state = state;
+export class Lobby extends DurableObject<Env> {
+  private conns = new Map<WebSocket, PlayerConn>();
+  private rooms = new Map<string, Room>();
+
+  constructor(private state: DurableObjectState, env: Env) {
+    super(state, env);
+    // WebSocket attachment 使房间能够随 Durable Object 休眠恢复。
+    for (const socket of state.getWebSockets()) {
+      const conn = socket.deserializeAttachment() as PlayerConn;
+      this.conns.set(socket, conn);
+      if (conn.joinedRoomId && conn.role === 'host') {
+        this.rooms.set(conn.joinedRoomId, { roomId: conn.joinedRoomId, createdAt: conn.createdAt, host: socket, guest: null });
+      }
+    }
+    for (const [socket, conn] of this.conns) {
+      if (conn.joinedRoomId && conn.role === 'guest') {
+        const room = this.rooms.get(conn.joinedRoomId);
+        if (room) room.guest = socket;
+        else this.clearRoom(socket);
+      }
+    }
   }
 
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (request.headers.get('Upgrade') !== 'websocket') {
-      return new Response('Expected websocket', { status: 426 });
-    }
-
-    // If a proxy/CDN strips websocket upgrade, fail loudly in logs.
-    // Also helps diagnosing browser-side "closed before established".
-    // eslint-disable-next-line no-console
-    console.log('DO /ws upgrade', {
-      path: url.pathname,
-      upgrade: request.headers.get('Upgrade'),
-      connection: request.headers.get('Connection'),
-      origin: request.headers.get('Origin'),
-      ua: request.headers.get('User-Agent'),
-    });
-
+  async fetch(): Promise<Response> {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
-
-    const connId = crypto.randomUUID();
-    server.accept();
-    this.conns.set(connId, { socket: server, playerName: 'Player', joinedRoomId: null });
-
-    server.addEventListener('message', (evt) => {
-      void this.onMessage(connId, evt.data);
+    this.state.acceptWebSocket(server);
+    const now = Date.now();
+    this.conns.set(server, {
+      id: crypto.randomUUID(), playerName: 'Player', joinedRoomId: null, role: null,
+      createdAt: now, tokens: 180, updatedAt: now,
     });
-    server.addEventListener('close', () => {
-      void this.onClose(connId);
-    });
-    server.addEventListener('error', () => {
-      void this.onClose(connId);
-    });
-
+    this.save(server);
     this.send(server, { type: 'lobby:state', rooms: this.listRooms() });
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private async onMessage(connId: string, data: unknown) {
-    const conn = this.conns.get(connId);
-    if (!conn) return;
-
-    let msg: WsClientMsg | null = null;
-    try {
-      const parsed = JSON.parse(typeof data === 'string' ? data : String(data));
-      if (isWsClientMsg(parsed)) msg = parsed;
-    } catch {
-      // ignore
-    }
-    if (!msg) {
-      this.send(conn.socket, { type: 'error', code: 'bad_json', message: 'Invalid message' });
+  webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) {
+    if (typeof data !== 'string' || new TextEncoder().encode(data).byteLength > 64_000) {
+      socket.close(1009, 'Message too large or unsupported');
+      this.onClose(socket);
       return;
     }
-
+    const conn = this.conns.get(socket);
+    if (!conn) throw new Error('Connection not registered');
+    const now = Date.now();
+    conn.tokens = Math.min(180, conn.tokens + (now - conn.updatedAt) * 0.09) - 1;
+    conn.updatedAt = now;
+    if (conn.tokens < 0) {
+      socket.close(1008, 'Message rate exceeded');
+      this.onClose(socket);
+      return;
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(data);
+    } catch {
+      this.send(socket, { type: 'error', code: 'bad_json', message: 'Invalid JSON' });
+      return;
+    }
+    const parsed = wsClientMsgSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.send(socket, { type: 'error', code: 'invalid_message', message: 'Invalid request' });
+      return;
+    }
+    const msg = parsed.data;
     switch (msg.type) {
-      case 'lobby:hello': {
-        conn.playerName = (msg.playerName || 'Player').slice(0, 18);
-        this.send(conn.socket, { type: 'lobby:state', rooms: this.listRooms() });
+      case 'lobby:hello':
+        conn.playerName = msg.playerName;
+        this.save(socket);
+        if (conn.joinedRoomId) this.notifyBoth(this.rooms.get(conn.joinedRoomId)!);
+        this.send(socket, { type: 'lobby:state', rooms: this.listRooms() });
         return;
-      }
-      case 'lobby:list': {
-        this.send(conn.socket, { type: 'lobby:state', rooms: this.listRooms() });
+      case 'lobby:list':
+        this.send(socket, { type: 'lobby:state', rooms: this.listRooms() });
         return;
-      }
+      case 'ping':
+        this.send(socket, { type: 'pong', t: msg.t });
+        return;
       case 'room:create': {
-        if (conn.joinedRoomId) this.leaveRoom(connId, conn.joinedRoomId);
+        if (conn.joinedRoomId) this.leaveRoom(socket);
         const roomId = this.generateRoomId();
-        const room: Room = {
-          roomId,
-          createdAt: Date.now(),
-          host: conn.socket,
-          guest: null,
-          hostName: conn.playerName,
-          guestName: null,
-        };
+        const room = { roomId, createdAt: now, host: socket, guest: null };
         this.rooms.set(roomId, room);
-        conn.joinedRoomId = roomId;
-        const summary = this.toSummary(room);
-        this.send(conn.socket, { type: 'room:created', room: summary, role: 'host' });
+        Object.assign(conn, { joinedRoomId: roomId, role: 'host', createdAt: now });
+        this.save(socket);
+        this.send(socket, { type: 'room:created', room: this.toSummary(room), role: 'host' });
         this.broadcastLobby();
         return;
       }
       case 'room:join': {
-        const roomId = normalizeRoomId(msg.roomId);
-        const room = this.rooms.get(roomId);
-        if (!room) {
-          this.send(conn.socket, { type: 'error', code: 'room_not_found', message: 'Room not found' });
-          return;
+        const room = this.rooms.get(msg.roomId);
+        if (!room) return this.error(socket, 'room_not_found', 'Room not found');
+        if (room.host !== socket && room.guest && room.guest !== socket) {
+          return this.error(socket, 'room_full', 'Room is full');
         }
-        if (conn.joinedRoomId && conn.joinedRoomId !== roomId) this.leaveRoom(connId, conn.joinedRoomId);
-
-        const isHost = room.host === conn.socket;
-        if (!isHost) {
-          if (room.guest && room.guest !== conn.socket) {
-            this.send(conn.socket, { type: 'error', code: 'room_full', message: 'Room is full' });
-            return;
-          }
-          room.guest = conn.socket;
-          room.guestName = conn.playerName;
-        } else {
-          room.hostName = conn.playerName;
-        }
-        conn.joinedRoomId = roomId;
-        const summary = this.toSummary(room);
-        this.send(conn.socket, { type: 'room:joined', room: summary, role: isHost ? 'host' : 'guest' });
-        // Notify counterpart (so host can start offer flow)
+        if (conn.joinedRoomId && conn.joinedRoomId !== room.roomId) this.leaveRoom(socket);
+        const role = room.host === socket ? 'host' : 'guest';
+        if (role === 'guest') room.guest = socket;
+        Object.assign(conn, { joinedRoomId: room.roomId, role, createdAt: room.createdAt });
+        this.save(socket);
         this.notifyBoth(room);
         this.broadcastLobby();
         return;
       }
-      case 'room:leave': {
-        const roomId = normalizeRoomId(msg.roomId);
-        if (conn.joinedRoomId === roomId) this.leaveRoom(connId, roomId);
-        this.send(conn.socket, { type: 'room:left', roomId });
+      case 'room:leave':
+        if (conn.joinedRoomId !== msg.roomId) return this.error(socket, 'not_in_room', 'You are not in this room');
+        this.leaveRoom(socket);
+        this.send(socket, { type: 'room:left', roomId: msg.roomId });
         this.broadcastLobby();
         return;
-      }
-      case 'signal:offer':
-      case 'signal:answer':
-      case 'signal:ice': {
-        const roomId = normalizeRoomId(msg.roomId);
-        const room = this.rooms.get(roomId);
-        if (!room) {
-          this.send(conn.socket, { type: 'error', code: 'room_not_found', message: 'Room not found' });
-          return;
-        }
-        const isHost = room.host === conn.socket;
-        const target = isHost ? room.guest : room.host;
-        if (!target) {
-          this.send(conn.socket, { type: 'error', code: 'peer_missing', message: 'Other player not connected yet' });
-          return;
-        }
-        this.send(target, msg as unknown as WsServerMsg);
+      case 'game:input':
+      case 'game:snapshot': {
+        const room = this.rooms.get(msg.roomId);
+        if (!room || conn.joinedRoomId !== room.roomId) return this.error(socket, 'not_in_room', 'You are not in this room');
+        const expected = msg.type === 'game:snapshot' ? room.host : room.guest;
+        if (socket !== expected) return this.error(socket, 'wrong_role', 'This action belongs to the other player');
+        const target = msg.type === 'game:snapshot' ? room.guest : room.host;
+        if (target) this.send(target, msg);
         return;
       }
     }
   }
 
-  private async onClose(connId: string) {
-    const conn = this.conns.get(connId);
-    if (!conn) return;
-    if (conn.joinedRoomId) this.leaveRoom(connId, conn.joinedRoomId);
-    this.conns.delete(connId);
+  webSocketClose(socket: WebSocket) {
+    this.onClose(socket);
+    socket.close(1000, 'Connection closed');
+  }
+
+  webSocketError(socket: WebSocket) {
+    this.onClose(socket);
+    socket.close(1011, 'Connection error');
+  }
+
+  private onClose(socket: WebSocket) {
+    if (!this.conns.has(socket)) return;
+    this.leaveRoom(socket);
+    this.conns.delete(socket);
     this.broadcastLobby();
   }
 
-  private leaveRoom(connId: string, roomId: string) {
-    const conn = this.conns.get(connId);
-    const room = this.rooms.get(roomId);
-    if (!conn || !room) return;
-
-    const isHost = room.host === conn.socket;
-    if (isHost) {
-      // Host leaving destroys the room.
+  private leaveRoom(socket: WebSocket) {
+    const conn = this.conns.get(socket)!;
+    const room = conn.joinedRoomId ? this.rooms.get(conn.joinedRoomId) : undefined;
+    this.clearRoom(socket);
+    if (!room) return;
+    if (room.host === socket) {
+      this.rooms.delete(room.roomId);
       if (room.guest) {
-        this.send(room.guest, { type: 'error', code: 'room_closed', message: 'Host left the room' });
+        this.clearRoom(room.guest);
+        this.send(room.guest, { type: 'room:closed', roomId: room.roomId, reason: 'Host left the room' });
       }
-      this.rooms.delete(roomId);
-    } else {
-      if (room.guest === conn.socket) {
-        room.guest = null;
-        room.guestName = null;
-        this.send(room.host, { type: 'error', code: 'guest_left', message: 'Guest left the room' });
-      }
+    } else if (room.guest === socket) {
+      room.guest = null;
+      this.notifyBoth(room);
     }
-    conn.joinedRoomId = null;
   }
+
+  private clearRoom(socket: WebSocket) {
+    const conn = this.conns.get(socket)!;
+    conn.joinedRoomId = null;
+    conn.role = null;
+    this.save(socket);
+  }
+
+  private save(socket: WebSocket) { socket.serializeAttachment(this.conns.get(socket)); }
 
   private notifyBoth(room: Room) {
     const summary = this.toSummary(room);
@@ -235,46 +204,33 @@ export class Lobby implements DurableObject {
   }
 
   private broadcastLobby() {
-    const msg: WsServerMsg = { type: 'lobby:state', rooms: this.listRooms() };
-    for (const c of this.conns.values()) this.send(c.socket, msg);
+    const msg = { type: 'lobby:state' as const, rooms: this.listRooms() };
+    for (const socket of this.conns.keys()) this.send(socket, msg);
   }
 
-  private listRooms(): RoomSummary[] {
-    const out: RoomSummary[] = [];
-    for (const room of this.rooms.values()) out.push(this.toSummary(room));
-    out.sort((a, b) => b.createdAt - a.createdAt);
-    return out;
-  }
+  private listRooms() { return [...this.rooms.values()].sort((a, b) => b.createdAt - a.createdAt).map((room) => this.toSummary(room)); }
 
   private toSummary(room: Room): RoomSummary {
     return {
-      roomId: room.roomId,
-      players: 1 + (room.guest ? 1 : 0),
-      maxPlayers: 2,
-      createdAt: room.createdAt,
+      roomId: room.roomId, createdAt: room.createdAt, players: room.guest ? 2 : 1, maxPlayers: 2,
+      hostName: this.conns.get(room.host)!.playerName,
+      guestName: room.guest ? this.conns.get(room.guest)!.playerName : null,
     };
   }
 
   private send(socket: WebSocket, msg: WsServerMsg) {
-    try {
-      socket.send(JSON.stringify(msg));
-    } catch {
-      // ignore
-    }
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
   }
+
+  private error(socket: WebSocket, code: string, message: string) { this.send(socket, { type: 'error', code, message }); }
 
   private generateRoomId(): string {
-    // Avoid confusing chars.
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     for (let attempt = 0; attempt < 30; attempt++) {
-      let out = '';
-      for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
-      if (!this.rooms.has(out)) return out;
+      const bytes = crypto.getRandomValues(new Uint8Array(6));
+      const roomId = [...bytes].map((value) => chars[value % chars.length]).join('');
+      if (!this.rooms.has(roomId)) return roomId;
     }
-    return crypto.randomUUID().slice(0, 6).toUpperCase();
+    throw new Error('Unable to allocate room ID');
   }
-}
-
-function normalizeRoomId(roomId: string) {
-  return String(roomId || '').trim().toUpperCase();
 }

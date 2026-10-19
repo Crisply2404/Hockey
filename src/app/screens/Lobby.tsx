@@ -1,56 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { LobbyClient } from '../../net/lobbyClient';
 import { RoomSummary } from '../../net/protocol';
-
-type LobbyRoom = RoomSummary;
 
 export default function Lobby({
   onPlayLocal,
   onEnterRoom,
+  rooms,
+  connection: connState,
+  error: err,
+  onClearError,
+  client,
 }: {
   onPlayLocal: () => void;
   onEnterRoom: (roomId: string, playerName: string) => void;
+  rooms: RoomSummary[];
+  connection: 'offline' | 'connecting' | 'online';
+  error: string | null;
+  onClearError: () => void;
+  client: LobbyClient | null;
 }) {
   const [playerName, setPlayerName] = useState(() => `Player${Math.floor(Math.random() * 900 + 100)}`);
   const [searchId, setSearchId] = useState('');
-  const [rooms, setRooms] = useState<LobbyRoom[]>([]);
-  const [connState, setConnState] = useState<'offline' | 'connecting' | 'online'>('offline');
-  const [err, setErr] = useState<string | null>(null);
-  const clientRef = useRef<LobbyClient | null>(null);
-
-  const wsUrl = useMemo(() => {
-    // Configure via Vite env. Example:
-    // VITE_LOBBY_WS_URL=wss://<your-worker-subdomain>/ws
-    const fromEnv = (import.meta as any).env?.VITE_LOBBY_WS_URL as string | undefined;
-    if (fromEnv) return fromEnv;
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    return `${proto}://${location.host}/ws`;
-  }, []);
-
-  useEffect(() => {
-    setConnState('connecting');
-    const client = new LobbyClient({
-      url: wsUrl,
-      onLobbyState: (rs) => {
-        setRooms(rs);
-        setConnState('online');
-      },
-      onRoomCreated: (room) => {
-        onEnterRoom(room.roomId, playerName.trim() || 'Player');
-      },
-      onError: (code, message) => {
-        setErr(`${code}: ${message}`);
-      },
-    });
-    clientRef.current = client;
-    client.connect(playerName.trim() || 'Player');
-    const poll = window.setInterval(() => client.requestList(), 1500);
-    return () => {
-      window.clearInterval(poll);
-      client.disconnect();
-      clientRef.current = null;
-    };
-  }, [onEnterRoom, playerName, wsUrl]);
 
   const filtered = useMemo(() => {
     const q = searchId.trim().toUpperCase();
@@ -59,15 +29,16 @@ export default function Lobby({
   }, [rooms, searchId]);
 
   const createRoom = () => {
-    setErr(null);
-    clientRef.current?.createRoom();
+    onClearError();
+    client?.setPlayerName(playerName);
+    client?.createRoom();
   };
 
   const joinById = () => {
     const id = searchId.trim().toUpperCase();
-    if (!id) return;
-    setErr(null);
-    clientRef.current?.joinRoom(id);
+    if (!/^[A-Z2-9]{6}$/.test(id)) return;
+    onClearError();
+    onEnterRoom(id, playerName.trim() || 'Player');
   };
 
   return (
@@ -83,7 +54,10 @@ export default function Lobby({
             <label className="text-xs font-bold tracking-widest uppercase opacity-60">Name</label>
             <input
               value={playerName}
-              onChange={(e) => setPlayerName(e.target.value)}
+              onChange={(e) => {
+                setPlayerName(e.target.value);
+                client?.setPlayerName(e.target.value);
+              }}
               className="px-4 py-2 rounded-full border border-black/20 bg-white text-sm font-semibold tracking-wide outline-none focus:ring-2 focus:ring-black/20"
               placeholder="Your name"
               maxLength={18}
@@ -100,6 +74,7 @@ export default function Lobby({
         <div className="mt-6 flex gap-3 flex-wrap">
           <button
             onClick={createRoom}
+            disabled={connState !== 'online'}
             className="bg-black text-white px-6 py-3 rounded-full font-bold text-xs tracking-widest uppercase hover:scale-105 hover:bg-gray-800 transition-all shadow-lg"
           >
             Create Room
@@ -114,6 +89,7 @@ export default function Lobby({
             />
             <button
               onClick={joinById}
+              disabled={connState !== 'online' || !/^[A-Z2-9]{6}$/.test(searchId.trim().toUpperCase())}
               className="bg-white text-black px-5 py-3 rounded-full font-bold text-xs tracking-widest uppercase border border-black/20 hover:scale-105 transition-transform"
             >
               Join
@@ -143,13 +119,14 @@ export default function Lobby({
                   <div className="flex items-baseline gap-3">
                     <div className="font-black tracking-[0.25em] text-sm">{r.roomId}</div>
                     <div className="text-xs font-bold tracking-widest uppercase opacity-60">
-                      {r.players}/{r.maxPlayers}
+                      {r.players}/{r.maxPlayers} · {r.hostName}{r.guestName ? ` · ${r.guestName}` : ''}
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => onEnterRoom(r.roomId, playerName.trim() || 'Player')}
+                      disabled={r.players === 2 || connState !== 'online'}
                       className="bg-black text-white px-4 py-2 rounded-full font-bold text-xs tracking-widest uppercase hover:scale-105 transition-transform"
                     >
                       Enter
@@ -162,9 +139,6 @@ export default function Lobby({
         </div>
       </div>
 
-      <div className="mt-4 text-black/40 text-[10px] tracking-[0.28em] font-bold select-none">
-        P2P MODE (A) • CF WORKER LOBBY/SIGNALING • GAME DATA NOT YET WIRED
-      </div>
     </div>
   );
 }

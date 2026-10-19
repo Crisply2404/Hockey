@@ -1,98 +1,66 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
-
 # Hockey
 
-Minimal air hockey game.
+简洁风格的气垫球网页游戏，支持本地游戏和两人联机。
 
-## Run locally
+## 本地游戏
 
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Run the app:
-   `npm run dev`
-
-## Online (P2P Mode A) — Lobby + Rooms (Cloudflare Worker)
-
-This repo now includes an **online lobby/room system** for WebRTC P2P (Mode A):
-
-- Lobby: room list, create room, join by roomId (search)
-- Signaling relay: offer/answer/ice (gameplay wiring comes next)
-
-### 1) Create Cloudflare account
-
-- Sign up at Cloudflare.
-- Make sure you can access the **Workers & Pages** dashboard.
-
-### 2) Install Wrangler (Cloudflare CLI)
-
-From the project root:
+安装 Node.js 后，在仓库根目录执行：
 
 ```bash
-npm install -g wrangler
-wrangler login
+npm ci
+npm run dev
 ```
 
-If you prefer not to install globally, you can use the local one under `cf/worker`.
+进入 `Local` 可以选择人机对战或者本地双人对战。左方使用 WASD、鼠标或者触摸；本地双人对战的右方使用方向键。
 
-### 3) Deploy the Lobby Worker (includes Durable Object)
+## 联机游戏
 
-The worker lives in `cf/worker`.
+游戏会自动连接部署好的 Cloudflare Worker。玩家通过 `Create Room` 建立两人房间，并向另一名玩家分享六位房间编号。加入者在大厅输入房间编号或者在公开列表点击 `Enter`。
+
+联机比赛由房主计算。加入者使用 WASD、方向键、鼠标或者触摸控制右方。比赛输入、比分、球门屏障、得分、获胜状态和主要碰撞效果都会同步。
+
+## 本地运行联机服务
+
+第一份终端启动 Cloudflare Worker：
 
 ```bash
-cd cf/worker
-npm install
-wrangler deploy
+npm --prefix cf/worker ci
+npm run dev:worker
 ```
 
-Notes:
-
-- The first deploy applies the Durable Object migration in `cf/worker/wrangler.toml`.
-- Wrangler will print your Worker URL, for example:
-  - `https://hockey-lobby.<your-subdomain>.workers.dev`
-- The lobby WebSocket endpoint is `.../ws`.
-
-### 4) Point the web app at the Worker
-
-Create or edit `d:/GameDev/WebGame/hockey/.env.local`:
-
-```ini
-VITE_LOBBY_WS_URL=wss://hockey-lobby.<your-subdomain>.workers.dev/ws
-```
-
-Then run:
+第二份终端启动游戏：
 
 ```bash
 npm run dev
 ```
 
-Open the page, you should see:
+浏览器打开 Vite 页面之后，可以使用多个浏览器页面测试房间。联机检查会自行启动独立的本地 Worker：
 
-- Lobby shows **CONNECTED**
-- Create Room -> enters Room screen
-- Room list updates and search by Room ID works
+```bash
+npm run test:online
+```
 
-### What you need to do in Cloudflare dashboard
+## 部署 Cloudflare Worker
 
-Nothing special for this phase (Worker + Durable Objects are configured by `wrangler.toml`).
+Cloudflare Worker 名称和域名由 `cf/worker/wrangler.toml` 指定；允许访问的网页来源和 SQLite Durable Object 也在此文件中配置。`npm run deploy:worker` 使用项目已经安装的 Wrangler，并将 Worker 部署至当前 Cloudflare 账户。
 
-If you want a custom domain later:
+部署前登录 Cloudflare：
 
-- Add your domain to Cloudflare
-- Workers -> Triggers -> Custom Domains
-- Set `VITE_LOBBY_WS_URL` to your custom domain `wss://.../ws`
+```bash
+npm --prefix cf/worker exec -- wrangler login
+```
 
-## Why not PeerJS + Vercel?
+登录后部署，并检查服务状态：
 
-You *can* build this with PeerJS, but this repo uses a Cloudflare Worker + Durable Object for these reasons:
+```bash
+npm run deploy:worker
+curl https://hockey-lobby.tcoinsm.workers.dev/health
+```
 
-- **We need a lobby/rooms anyway**: room list + search + join are first-class features here.
-- **Stable WebSocket signaling**: Vercel Serverless/Edge is not a great fit for long-lived WebSocket stateful routing; Durable Objects are.
-- **Lower moving parts**: no extra PeerJS server to run; signaling and lobby are one deploy.
-- **More control**: protocol is explicit (offer/answer/ice), so we can add reconnect rules and debugging without a black box.
+生产网页自动连接 `wss://hockey-lobby.tcoinsm.workers.dev/ws`。部署网页的人也可以通过构建环境变量 `VITE_LOBBY_WS_URL` 指定游戏使用的服务地址。玩家加入房间时只需要房间编号。
 
-If you already have a good PeerJS server + region strategy, it can work, but you still end up needing a lobby/state store somewhere.
+## 项目说明
+
+- 游戏元素与操作名称见 [GLOSSARY.md](./GLOSSARY.md)。
+- 规则、双方角色、联机消息和核对记录见 [docs/project-understanding.md](./docs/project-understanding.md)。
+- Matt engineering skills 配置见 [docs/agents/](./docs/agents/)。

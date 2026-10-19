@@ -1,11 +1,13 @@
 name = "hockey-lobby"
 main = "src/worker.ts"
-compatibility_date = "2026-01-01"
+compatibility_date = "2026-10-19"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGINS = "https://crisply2404.github.io,http://localhost:3000,http://127.0.0.1:3000,http://localhost:3016,http://127.0.0.1:3016"
 
 [durable_objects]
-bindings = [
-  { name = "LOBBY", class_name = "Lobby" }
-]
+bindings = [{ name = "LOBBY", class_name = "Lobby" }]
 
 [[migrations]]
 tag = "v1"

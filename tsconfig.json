@@ -25,5 +25,7 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": ["index.tsx", "App.tsx", "types.ts", "hitstopControl.ts", "components/**/*.tsx", "src/**/*.ts", "src/**/*.tsx", "vite.config.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "cf/worker", "dist", ".scratch"]
 }

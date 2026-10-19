@@ -1,32 +1,18 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { initHitStopControlState } from '../hitstopControl';
 import { HockeyRef } from '../types';
+import type { GameSnapshot, PlayerInput } from '../src/net/protocol';
 
 interface HockeyProps {
   mode: 'pve' | 'pvp';
-    // Optional online driver:
-    // - host can read local input and emit snapshots
-    // - guest can apply snapshots and render interpolation
     online?: {
         enabled: boolean;
+        ready: boolean;
         role: 'host' | 'guest';
-        // For guest: latest authoritative snapshot to render.
-        snapshot?: {
-            p1: { x: number; y: number; score: number };
-            p2: { x: number; y: number; score: number };
-            puck: { x: number; y: number; vx: number; vy: number; spin: number; rotation: number };
-            leftGoalIntegrity: boolean;
-            rightGoalIntegrity: boolean;
-            winner: null | 1 | 2;
-        };
-        // For host: callback to publish snapshots.
-        onSnapshot?: (snap: any) => void;
-        // For host: optional hook to receive remote input.
-        remoteInput?: {
-            keys: { up: boolean; down: boolean; left: boolean; right: boolean };
-            // for p2 in pvp online, allow remote mouse too if desired later
-            mouse?: { x: number | null; y: number | null };
-        };
+        snapshot?: GameSnapshot;
+        onSnapshot: (snap: GameSnapshot) => void;
+        onInput: (input: PlayerInput) => void;
+        readRemoteInput: () => PlayerInput | null;
     };
 }
 
@@ -85,6 +71,8 @@ const COLOR_CONFETTI = ['#FF0000', '#0000FF', '#00FF00', '#FF00FF', '#FFFF00'];
 
 const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
 
     // Feature toggle: disable hit-stop pull-back / blue<->red conversion for now.
     const ENABLE_HITSTOP_CONTROL = false;
@@ -159,6 +147,8 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
 
     let animationFrameId: number;
     let lastTime = performance.now();
+    let lastNetworkTime = -Infinity;
+    let lastGuestSnapshot: GameSnapshot | undefined;
 
     // --- UTILS ---
     const spawnParticles = (x: number, y: number, angle: number, speed: number, type: 'spark' | 'debris' = 'spark', count: number = 5, debrisLength: number = 10) => {
@@ -372,12 +362,26 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
 
     // --- MAIN LOOP ---
     const loop = (time: number) => {
+      const online = onlineRef.current;
       const rawDt = (time - lastTime) / 16.666; 
       lastTime = time;
       
             const s = state.current;
       const dt = Math.min(rawDt, 4.0) * s.slowMoFactor;
       const inp = inputs.current;
+      const remoteInput = online?.enabled && online.role === 'host' ? online.readRemoteInput() : null;
+
+      if (online?.enabled && online.role === 'guest' && online.ready && time - lastNetworkTime >= 50) {
+          lastNetworkTime = time;
+          online.onInput({
+              t: time,
+              keys: { w: inp.w || inp.up, a: inp.a || inp.left, s: inp.s || inp.down, d: inp.d || inp.right },
+              mouse: {
+                  x: inp.mouseX === null ? null : Math.max(0, Math.min(TABLE_WIDTH, inp.mouseX)),
+                  y: inp.mouseY === null ? null : Math.max(0, Math.min(TABLE_HEIGHT, inp.mouseY)),
+              },
+          });
+      }
 
             // Online guest: apply authoritative snapshot and skip all gameplay simulation.
             if (online?.enabled && online.role === 'guest' && online.snapshot) {
@@ -390,18 +394,25 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
                 s.puck.spin = snap.puck.spin; s.puck.rotation = snap.puck.rotation;
                 s.leftGoalIntegrity = snap.leftGoalIntegrity;
                 s.rightGoalIntegrity = snap.rightGoalIntegrity;
-                // zero out juice; visuals can diverge
-                s.hitStop = 0;
-                s.goalActive = false;
-                s.shake = 0;
+                if (lastGuestSnapshot !== snap) {
+                    if (snap.winner && lastGuestSnapshot?.winner !== snap.winner) spawnConfetti(snap.winner);
+                    if (!snap.winner) s.confetti = [];
+                    Object.assign(s, {
+                        ...snap.effects,
+                        squash: { ...snap.effects.squash },
+                        shockwaves: snap.effects.shockwaves.map((wave) => ({ ...wave })),
+                        particles: snap.effects.particles.map((particle) => ({ ...particle })),
+                    });
+                    lastGuestSnapshot = snap;
+                }
             }
 
             // Online host: apply remote input to player2 controls in PVP.
-            if (online?.enabled && online.role === 'host' && mode === 'pvp' && online.remoteInput) {
-                inp.up = online.remoteInput.keys.up;
-                inp.down = online.remoteInput.keys.down;
-                inp.left = online.remoteInput.keys.left;
-                inp.right = online.remoteInput.keys.right;
+            if (online?.enabled && online.role === 'host' && mode === 'pvp') {
+                inp.up = remoteInput?.keys.w ?? false;
+                inp.down = remoteInput?.keys.s ?? false;
+                inp.left = remoteInput?.keys.a ?? false;
+                inp.right = remoteInput?.keys.d ?? false;
             }
 
     // 计算输入速度（冻结帧也有效：实体不动，但意图仍可捕捉）
@@ -471,6 +482,7 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
               if (c.y > TABLE_HEIGHT) { c.y = TABLE_HEIGHT; if (c.vy > 0) c.vy = 0; }
           }
 
+          if (!(online?.enabled && online.role === 'guest')) {
           // Allow paddle movement for fun
           // Player 1
           let moveX = 0; let moveY = 0;
@@ -493,9 +505,10 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
           s.p1.y = Math.max(PADDLE_RADIUS, Math.min(TABLE_HEIGHT - PADDLE_RADIUS, s.p1.y));
           s.p2.x = Math.max(TABLE_WIDTH/2 + PADDLE_RADIUS, Math.min(TABLE_WIDTH - PADDLE_RADIUS, s.p2.x));
           s.p2.y = Math.max(PADDLE_RADIUS, Math.min(TABLE_HEIGHT - PADDLE_RADIUS, s.p2.y));
+          }
       }
 
-    if (s.winner === null && !(online?.enabled && online.role === 'guest')) {
+    if (s.winner === null && (!online?.enabled || (online.role === 'host' && online.ready))) {
         // --- LOGIC ---
         s.p1.recoilX *= (0.85 * dt + (1-dt)); s.p1.recoilY *= (0.85 * dt + (1-dt));
         s.p2.recoilX *= (0.85 * dt + (1-dt)); s.p2.recoilY *= (0.85 * dt + (1-dt));
@@ -550,7 +563,16 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
             if (mode === 'pvp') {
                 let p2X = 0; let p2Y = 0;
                 if (inp.up) p2Y -= 1; if (inp.down) p2Y += 1; if (inp.left) p2X -= 1; if (inp.right) p2X += 1;
-                s.p2.x += p2X * 10 * dt; s.p2.y += p2Y * 10 * dt;
+                if (remoteInput?.mouse.x !== null && remoteInput?.mouse.y !== null && remoteInput && p2X === 0 && p2Y === 0) {
+                    let dx = remoteInput.mouse.x - s.p2.x;
+                    let dy = remoteInput.mouse.y - s.p2.y;
+                    const distance = Math.hypot(dx, dy);
+                    if (distance > MAX_PADDLE_SPEED) { dx *= MAX_PADDLE_SPEED / distance; dy *= MAX_PADDLE_SPEED / distance; }
+                    s.p2.x += dx * dt;
+                    s.p2.y += dy * dt;
+                } else {
+                    s.p2.x += p2X * 10 * dt; s.p2.y += p2Y * 10 * dt;
+                }
             } else {
                 // --- AGGRESSIVE AI LOGIC ---
                 const puck = s.puck;
@@ -1011,8 +1033,10 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
       }
 
             // Online host: emit snapshot after simulation step (authoritative state only).
-            if (online?.enabled && online.role === 'host' && online.onSnapshot) {
+            if (online?.enabled && online.role === 'host' && online.ready && time - lastNetworkTime >= 50) {
+                lastNetworkTime = time;
                 online.onSnapshot({
+                    t: time,
                     p1: { x: s.p1.x, y: s.p1.y, score: s.p1.score },
                     p2: { x: s.p2.x, y: s.p2.y, score: s.p2.score },
                     puck: {
@@ -1026,6 +1050,13 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
                     leftGoalIntegrity: s.leftGoalIntegrity,
                     rightGoalIntegrity: s.rightGoalIntegrity,
                     winner: s.winner,
+                    effects: {
+                        hitStop: s.hitStop, hitStopMax: s.hitStopMax, lastImpactNormal: s.lastImpactNormal,
+                        isInversionHit: s.isInversionHit, goalActive: s.goalActive, slowMoFactor: s.slowMoFactor,
+                        currentSpeedDisplay: s.currentSpeedDisplay, shake: s.shake, squash: { ...s.squash },
+                        shockwaves: s.shockwaves.slice(-12).map((wave) => ({ ...wave })),
+                        particles: s.particles.slice(-40).map((particle) => ({ ...particle })),
+                    },
                 });
             }
 
@@ -1385,8 +1416,12 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
     const handleMouseMove = (e: MouseEvent) => { if (!canvas) return; const dpr = window.devicePixelRatio || 1; const scale = Math.min(canvas.width / dpr / TABLE_WIDTH, canvas.height / dpr / TABLE_HEIGHT) * 0.95; const baseX = (canvas.width / dpr - TABLE_WIDTH * scale) / 2; const baseY = (canvas.height / dpr - TABLE_HEIGHT * scale) / 2; const rect = canvas.getBoundingClientRect(); const x = (e.clientX - rect.left) * dpr; const y = (e.clientY - rect.top) * dpr; inputs.current.mouseX = (x / dpr - baseX) / scale; inputs.current.mouseY = (y / dpr - baseY) / scale; };
     const handleTouchMove = (e: TouchEvent) => { e.preventDefault(); if (!canvas || !e.touches[0]) return; const t = e.touches[0]; const dpr = window.devicePixelRatio || 1; const scale = Math.min(canvas.width / dpr / TABLE_WIDTH, canvas.height / dpr / TABLE_HEIGHT) * 0.95; const baseX = (canvas.width / dpr - TABLE_WIDTH * scale) / 2; const baseY = (canvas.height / dpr - TABLE_HEIGHT * scale) / 2; const rect = canvas.getBoundingClientRect(); const x = (t.clientX - rect.left) * dpr; const y = (t.clientY - rect.top) * dpr; inputs.current.mouseX = (x / dpr - baseX) / scale; inputs.current.mouseY = (y / dpr - baseY) / scale; };
 
+    const clearInput = () => {
+      Object.assign(inputs.current, { w: false, a: false, s: false, d: false, up: false, down: false, left: false, right: false, mouseX: null, mouseY: null });
+    };
+    window.addEventListener('blur', clearInput);
     window.addEventListener('keydown', handleKeyDown); window.addEventListener('keyup', handleKeyUp); window.addEventListener('mousemove', handleMouseMove); canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-    return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); window.removeEventListener('mousemove', handleMouseMove); canvas.removeEventListener('touchmove', handleTouchMove); cancelAnimationFrame(animationFrameId); };
+    return () => { window.removeEventListener('blur', clearInput); window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); window.removeEventListener('mousemove', handleMouseMove); canvas.removeEventListener('touchmove', handleTouchMove); cancelAnimationFrame(animationFrameId); };
 
   }, [mode]);
 
@@ -1401,6 +1436,16 @@ const Hockey = forwardRef<HockeyRef, HockeyProps>(({ mode, online }, ref) => {
         state.current.puck.vx = (Math.random() > 0.5 ? 1 : -1) * 6; 
         state.current.puck.vy = 0;
         state.current.confetti = [];
+        Object.assign(state.current.p1, { x: 100, y: TABLE_HEIGHT / 2, prevX: 100, prevY: TABLE_HEIGHT / 2, vx: 0, vy: 0, recoilX: 0, recoilY: 0, hitCooldown: 0 });
+        Object.assign(state.current.p2, { x: TABLE_WIDTH - 100, y: TABLE_HEIGHT / 2, prevX: TABLE_WIDTH - 100, prevY: TABLE_HEIGHT / 2, vx: 0, vy: 0, recoilX: 0, recoilY: 0, hitCooldown: 0 });
+        Object.assign(state.current.puck, { spin: 0, rotation: 0 });
+        Object.assign(state.current, {
+          consecutiveHits: 0, hitStop: 0, hitStopMax: 0, barrierCooldown: 0, currentSpeedDisplay: 0,
+          goalActive: false, goalTimer: 0, goalScorer: 0, slowMoFactor: 1,
+          leftGoalIntegrity: true, rightGoalIntegrity: true, shake: 0, isInversionHit: false,
+          particles: [], shockwaves: [], hitIntent: initHitStopControlState(),
+          squash: { x: 1, y: 1, angle: 0, recovery: 0.4 },
+        });
     }
   }));
 

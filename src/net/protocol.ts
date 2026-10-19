@@ -1,56 +1,77 @@
-export type WsClientMsg =
-  | { type: 'lobby:hello'; playerName: string }
-  | { type: 'lobby:list' }
-  | { type: 'room:create' }
-  | { type: 'room:join'; roomId: string }
-  | { type: 'room:leave'; roomId: string }
-  | { type: 'signal:offer'; roomId: string; sdp: string }
-  | { type: 'signal:answer'; roomId: string; sdp: string }
-  | { type: 'signal:ice'; roomId: string; candidate: string }
-  | { type: 'game:input'; roomId: string; input: PlayerInput };
+import { z } from 'zod';
 
-export type PlayerInput = {
-  t: number;
-  keys: {
-    w: boolean;
-    a: boolean;
-    s: boolean;
-    d: boolean;
-  };
-  mouse: {
-    x: number | null;
-    y: number | null;
-  };
-};
+const finite = z.number().finite();
+const roomId = z.string().trim().toUpperCase().regex(/^[A-Z2-9]{6}$/);
+const position = z.object({ x: finite, y: finite });
+const paddle = position.extend({ score: z.number().int().min(0).max(7) });
+const particle = position.extend({
+  vx: finite, vy: finite, life: finite, decay: finite,
+  type: z.enum(['spark', 'debris']),
+  rotation: finite.optional(), vRot: finite.optional(), length: finite.optional(), radius: finite.optional(),
+});
 
-export type RoomSummary = {
-  roomId: string;
-  players: number;
-  maxPlayers: 2;
-  createdAt: number;
-};
+export const playerInputSchema = z.object({
+  t: finite,
+  keys: z.object({ w: z.boolean(), a: z.boolean(), s: z.boolean(), d: z.boolean() }),
+  mouse: z.object({ x: finite.min(0).max(800).nullable(), y: finite.min(0).max(450).nullable() }),
+});
 
-export type WsServerMsg =
-  | { type: 'lobby:state'; rooms: RoomSummary[] }
-  | { type: 'room:created'; room: RoomSummary; role: 'host' }
-  | { type: 'room:joined'; room: RoomSummary; role: 'host' | 'guest' }
-  | { type: 'room:left'; roomId: string }
-  | { type: 'signal:offer'; roomId: string; sdp: string }
-  | { type: 'signal:answer'; roomId: string; sdp: string }
-  | { type: 'signal:ice'; roomId: string; candidate: string }
-  | { type: 'game:snapshot'; roomId: string; snapshot: GameSnapshot }
-  | { type: 'error'; code: string; message: string };
+export const gameSnapshotSchema = z.object({
+  t: finite,
+  p1: paddle,
+  p2: paddle,
+  puck: position.extend({ vx: finite, vy: finite, spin: finite, rotation: finite }),
+  leftGoalIntegrity: z.boolean(),
+  rightGoalIntegrity: z.boolean(),
+  winner: z.union([z.literal(1), z.literal(2)]).nullable(),
+  effects: z.object({
+    hitStop: finite, hitStopMax: finite, lastImpactNormal: finite, isInversionHit: z.boolean(),
+    goalActive: z.boolean(), slowMoFactor: finite, currentSpeedDisplay: finite, shake: finite,
+    squash: z.object({ x: finite, y: finite, angle: finite, recovery: finite }),
+    shockwaves: z.array(position.extend({ r: finite, alpha: finite })).max(12),
+    particles: z.array(particle).max(40),
+  }),
+});
 
-export type GameSnapshot = {
-  t: number;
-  p1: { x: number; y: number; score: number };
-  p2: { x: number; y: number; score: number };
-  puck: { x: number; y: number; vx: number; vy: number; spin: number; rotation: number };
-  leftGoalIntegrity: boolean;
-  rightGoalIntegrity: boolean;
-  winner: null | 1 | 2;
-};
+export const roomSummarySchema = z.object({
+  roomId,
+  players: z.union([z.literal(1), z.literal(2)]),
+  maxPlayers: z.literal(2),
+  createdAt: finite,
+  hostName: z.string().max(18),
+  guestName: z.string().max(18).nullable(),
+});
 
-export function isWsServerMsg(v: unknown): v is WsServerMsg {
-  return !!v && typeof v === 'object' && typeof (v as any).type === 'string';
+export const wsClientMsgSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('lobby:hello'), playerName: z.string().trim().min(1).max(18) }),
+  z.object({ type: z.literal('lobby:list') }),
+  z.object({ type: z.literal('room:create') }),
+  z.object({ type: z.literal('room:join'), roomId }),
+  z.object({ type: z.literal('room:leave'), roomId }),
+  z.object({ type: z.literal('game:input'), roomId, input: playerInputSchema }),
+  z.object({ type: z.literal('game:snapshot'), roomId, snapshot: gameSnapshotSchema }),
+  z.object({ type: z.literal('ping'), t: finite }),
+]);
+
+export const wsServerMsgSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('lobby:state'), rooms: z.array(roomSummarySchema) }),
+  z.object({ type: z.literal('room:created'), room: roomSummarySchema, role: z.literal('host') }),
+  z.object({ type: z.literal('room:joined'), room: roomSummarySchema, role: z.enum(['host', 'guest']) }),
+  z.object({ type: z.literal('room:left'), roomId }),
+  z.object({ type: z.literal('room:closed'), roomId, reason: z.string() }),
+  z.object({ type: z.literal('game:input'), roomId, input: playerInputSchema }),
+  z.object({ type: z.literal('game:snapshot'), roomId, snapshot: gameSnapshotSchema }),
+  z.object({ type: z.literal('pong'), t: finite }),
+  z.object({ type: z.literal('error'), code: z.string(), message: z.string() }),
+]);
+
+export type WsClientMsg = z.infer<typeof wsClientMsgSchema>;
+export type WsServerMsg = z.infer<typeof wsServerMsgSchema>;
+export type PlayerInput = z.infer<typeof playerInputSchema>;
+export type GameSnapshot = z.infer<typeof gameSnapshotSchema>;
+export type RoomSummary = z.infer<typeof roomSummarySchema>;
+export type OnlineRole = 'host' | 'guest';
+
+export function isWsServerMsg(value: unknown): value is WsServerMsg {
+  return wsServerMsgSchema.safeParse(value).success;
 }

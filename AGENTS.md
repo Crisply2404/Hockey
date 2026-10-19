@@ -1,3 +1,7 @@
+## 聊天记录与提交
+
+Hockey 项目的聊天记录保存在 `docs/CHAT_HISTORY.md`。按照 `conversation-and-commits` 保存用户原文与每轮最终回复，时间采用 `Asia/Shanghai`。完成适用的验证后创建 Conventional Commit，每次提交成功后立即推送。
+
 ## Agent skills
 
 ### Issue tracker
