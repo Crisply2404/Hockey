@@ -1,0 +1,457 @@
+/*
+ * Hockey 界面样式。
+ *
+ * 界面只用球桌上已有的材料：纸色、墨色、一种线宽、直角的方框和正圆。
+ * --line 是球桌边墙在屏幕上的粗细，由比赛画布按当前缩放写入；界面上所有的线都用它。
+ * 纸色与墨色的数值与 src/game/view.ts 中的 PALETTES 保持一致。红色只用于错误提示。
+ */
+:root {
+  --paper: #eceae4;
+  --ink: #222220;
+  --red: #c8321e;
+  --line: 3px;
+  --soft: color-mix(in srgb, var(--ink) 55%, var(--paper));
+  --faint: color-mix(in srgb, var(--ink) 12%, var(--paper));
+  --sans: "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+}
+
+html[data-theme="dark"] {
+  --paper: #191918;
+  --ink: #dedcd6;
+  --red: #ff6a55;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input {
+  font-family: inherit;
+  color: inherit;
+}
+
+:focus {
+  outline: none;
+}
+
+.app {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--paper);
+}
+
+.game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+/* ---------- 词 ---------- */
+
+.word {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  height: 48px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration-thickness: var(--line);
+  text-underline-offset: 8px;
+}
+
+.word--large {
+  height: 60px;
+  font-size: clamp(22px, 3.2vw, 30px);
+  font-weight: 900;
+}
+
+.word--small {
+  height: 40px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+
+.word.is-off {
+  color: var(--soft);
+}
+
+.word.is-on,
+.word:focus-visible {
+  text-decoration-line: underline;
+}
+
+.word:disabled {
+  color: var(--soft);
+  cursor: default;
+}
+
+.word:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+@media (hover: hover) {
+  .word:hover:not(:disabled) {
+    text-decoration-line: underline;
+  }
+}
+
+/* ---------- 图标 ---------- */
+
+.icon-btn {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.icon-btn svg {
+  width: 26px;
+  height: 26px;
+  /* 图标的线也和球桌一样粗；图标按 24 个单位绘制。 */
+  stroke-width: calc(var(--line) * 24 / 26);
+}
+
+.icon-btn:disabled {
+  opacity: 0.2;
+  cursor: default;
+}
+
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+.icon-btn:focus-visible {
+  background: var(--faint);
+}
+
+@media (hover: hover) {
+  .icon-btn:hover:not(:disabled) {
+    background: var(--faint);
+  }
+}
+
+/* ---------- 方框：线和球桌的边墙一样粗 ---------- */
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: min(240px, 100%);
+  max-width: 100%;
+  padding: 26px 34px;
+  border: var(--line) solid var(--ink);
+  border-radius: calc(var(--line) / 2);
+  background: var(--paper);
+  text-align: center;
+}
+
+.frame__note {
+  margin: 4px 0 10px;
+  font-size: 15px;
+  color: var(--soft);
+}
+
+.frame__code {
+  padding-left: 0.22em;
+  font-size: clamp(36px, 9vw, 56px);
+  font-weight: 900;
+  letter-spacing: 0.22em;
+  line-height: 1.2;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.frame--form {
+  align-items: stretch;
+  gap: 22px;
+  width: min(400px, 100%);
+  padding: 20px 34px 26px;
+  text-align: left;
+}
+
+.frame__head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -14px;
+}
+
+.frame__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.frame__primary {
+  align-self: center;
+  margin-top: 4px;
+}
+
+.popup {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  pointer-events: none;
+}
+
+.popup .frame {
+  pointer-events: auto;
+}
+
+/* ---------- 主菜单 ---------- */
+
+.home,
+.lobby {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 64px 24px 32px;
+  overflow: auto;
+}
+
+.corner {
+  position: absolute;
+  top: max(8px, env(safe-area-inset-top));
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.home__content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(28px, 7vh, 64px);
+  padding: 56px;
+  background: radial-gradient(closest-side, var(--paper) 52%, transparent);
+}
+
+.title {
+  margin: 0;
+  padding-left: 0.12em;
+  font-size: clamp(48px, 11vw, 112px);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.12em;
+}
+
+.menu {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.levels {
+  display: flex;
+  margin: -6px 0 14px;
+}
+
+/* ---------- 比赛画面 ---------- */
+
+.game {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: max(6px, env(safe-area-inset-top)) 10px 0;
+}
+
+.topbar__group {
+  display: flex;
+  align-items: center;
+}
+
+.game__stage {
+  position: relative;
+  min-height: 0;
+}
+
+.toast {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--red);
+  transform: translateX(-50%);
+}
+
+.dots::after {
+  content: "...";
+  display: inline-block;
+  width: 0;
+  overflow: hidden;
+  vertical-align: bottom;
+  animation: dots 1.4s steps(4, end) infinite;
+}
+
+/* ---------- 联机大厅 ---------- */
+
+.input {
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: var(--line) solid var(--ink);
+  border-radius: 0;
+  background: transparent;
+  font-size: 18px;
+  font-weight: 700;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.input--code {
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+.input::placeholder {
+  letter-spacing: 0.04em;
+  font-weight: 400;
+  text-transform: none;
+  color: var(--soft);
+}
+
+.join {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notice {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--red);
+}
+
+.rooms {
+  display: flex;
+  flex-direction: column;
+  max-height: 28vh;
+  margin: 0 0 0 -14px;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.rooms .word {
+  justify-content: flex-start;
+}
+
+.rooms__code {
+  letter-spacing: 0.2em;
+}
+
+.rooms__who {
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--soft);
+}
+
+/* ---------- 窄屏与矮屏 ---------- */
+
+@media (max-width: 520px) {
+  .home__content {
+    padding: 32px 0;
+  }
+
+  .frame {
+    padding: 20px 24px;
+  }
+}
+
+@media (max-height: 520px) {
+  .home,
+  .lobby {
+    padding-top: 52px;
+    padding-bottom: 12px;
+  }
+
+  .home__content {
+    gap: 12px;
+    padding: 12px 48px;
+  }
+
+  .title {
+    font-size: clamp(36px, 14vh, 64px);
+  }
+
+  .word--large {
+    height: 46px;
+  }
+
+  .frame {
+    padding: 14px 28px;
+  }
+}
+
+@keyframes dots {
+  to { width: 1.3em; }
+}

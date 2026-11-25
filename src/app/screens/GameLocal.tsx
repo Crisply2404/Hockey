@@ -1,51 +1,67 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Hockey from '../../../components/Hockey';
-import { HockeyRef } from '../../../types';
+import type { HockeyRef } from '../../../types';
+import { useT } from '../i18n';
+import { useSettings } from '../settings';
+import { Icon, IconButton, Popup, SoundButton, TopBar, Word } from '../ui';
+import { useMatch } from '../useMatch';
 
-export default function GameLocal({ onBack }: { onBack: () => void }) {
+export default function GameLocal({ mode, onExit }: { mode: 'pve' | 'pvp'; onExit: () => void }) {
+  const t = useT();
+  const settings = useSettings();
   const gameRef = useRef<HockeyRef>(null);
-  const [gameMode, setGameMode] = useState<'pve' | 'pvp'>('pve');
+  const [paused, setPaused] = useState(false);
+  const match = useMatch();
+  const playing = match.phase === 'playing';
 
-  const handleModeToggle = () => {
-    setGameMode((prev) => (prev === 'pve' ? 'pvp' : 'pve'));
+  // Esc 或 P 暂停；页面切到后台时自动暂停。
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.repeat || !playing) return;
+      if (event.key === 'Escape' || event.key.toLowerCase() === 'p') setPaused((current) => !current);
+    };
+    const pauseNow = () => { if (playing) setPaused(true); };
+    const handleVisibility = () => { if (document.hidden) pauseNow(); };
+    window.addEventListener('keydown', handleKey);
+    window.addEventListener('blur', pauseNow);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('keydown', handleKey);
+      window.removeEventListener('blur', pauseNow);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [playing]);
+
+  const restart = () => {
     gameRef.current?.resetGame();
+    setPaused(false);
   };
 
   return (
-    <>
-      <div className="absolute inset-0 z-0">
-        <Hockey ref={gameRef} mode={gameMode} />
+    <div className="game">
+      <TopBar
+        start={<IconButton label={t.pause} onClick={() => setPaused(true)} disabled={!playing || paused}>{Icon.pause}</IconButton>}
+        end={<SoundButton />}
+      />
+
+      <div className="game__stage">
+        <Hockey ref={gameRef} mode={mode} difficulty={settings.difficulty} paused={paused} theme={settings.theme} onEvent={match.onEvent} />
+
+        {paused && (
+          <Popup label={t.pause}>
+            <Word onClick={() => setPaused(false)} autoFocus>{t.resume}</Word>
+            <Word onClick={restart}>{t.restart}</Word>
+            <Word onClick={onExit}>{t.quit}</Word>
+          </Popup>
+        )}
+
+        {match.phase === 'settled' && (
+          <Popup label={t.rematch}>
+            <Word onClick={restart} autoFocus>{t.rematch}</Word>
+            <Word onClick={onExit}>{t.quit}</Word>
+          </Popup>
+        )}
       </div>
-
-      <div className="absolute bottom-8 z-10 flex gap-4 pointer-events-none">
-        <div className="pointer-events-auto bg-black/5 backdrop-blur-md border border-black/10 text-black px-6 py-2 rounded-full flex items-center gap-4 transition-all hover:bg-black/10 shadow-sm">
-          <span className="text-xs font-bold tracking-widest uppercase opacity-50">Mode</span>
-          <button
-            onClick={handleModeToggle}
-            className="font-black text-sm tracking-wider hover:scale-105 transition-transform"
-          >
-            {gameMode === 'pve' ? 'HUMAN VS AI' : 'HUMAN VS HUMAN'}
-          </button>
-        </div>
-
-        <button
-          onClick={() => gameRef.current?.resetGame()}
-          className="pointer-events-auto bg-black text-white px-6 py-2 rounded-full font-bold text-xs tracking-widest uppercase hover:scale-105 hover:bg-gray-800 transition-all shadow-lg"
-        >
-          Reset Game
-        </button>
-
-        <button
-          onClick={onBack}
-          className="pointer-events-auto bg-white text-black px-6 py-2 rounded-full font-bold text-xs tracking-widest uppercase border border-black/20 hover:scale-105 transition-all shadow-sm"
-        >
-          Back
-        </button>
-      </div>
-
-      <div className="absolute top-10 z-10 text-black/30 text-[10px] tracking-[0.3em] font-bold pointer-events-none select-none">
-        FIRST TO 7 WINS • WASD / MOUSE TO MOVE
-      </div>
-    </>
+    </div>
   );
 }
